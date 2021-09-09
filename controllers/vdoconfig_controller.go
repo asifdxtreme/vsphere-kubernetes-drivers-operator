@@ -179,20 +179,20 @@ func (r *VDOConfigReconciler) WatchForConfigMapChanges() {
 	mutex := &sync.Mutex{}
 
 	for {
-		watcher, err := clientset.CoreV1().ConfigMaps(VDO_NAMESPACE).Watch(
+		watchConfigMap, err := clientset.CoreV1().ConfigMaps(VDO_NAMESPACE).Watch(
 			context.TODO(),
 			metav1.SingleObject(metav1.ObjectMeta{
 				Name: CM_NAME, Namespace: VDO_NAMESPACE}))
 		if err != nil {
 			r.Logger.Error(err, fmt.Sprintf("Error occurred while creating watcher for configMap %s", err))
 		}
-		r.updateMatrixEndpoint(watcher.ResultChan(), mutex)
+		r.updateMatrixConfig(watchConfigMap.ResultChan(), mutex)
 	}
 }
 
-func (r *VDOConfigReconciler) updateMatrixEndpoint(eventChannel <-chan watch.Event, mutex *sync.Mutex) {
+func (r *VDOConfigReconciler) updateMatrixConfig(getEvents <-chan watch.Event, mutex *sync.Mutex) {
 	for {
-		event, open := <-eventChannel
+		event, open := <-getEvents
 		if open {
 			switch event.Type {
 			case watch.Added:
@@ -201,19 +201,15 @@ func (r *VDOConfigReconciler) updateMatrixEndpoint(eventChannel <-chan watch.Eve
 				mutex.Lock()
 				// Update our config
 				if updatedMap, ok := event.Object.(*v1.ConfigMap); ok {
-					if endpointKey, ok := updatedMap.Data["versionConfigURL"]; ok {
-						if targetURL, ok := updatedMap.Data[endpointKey]; ok {
-							os.Setenv(COMPAT_MATRIX_CONFIG_URL, targetURL)
-						}
+					if dataURLValue, ok := updatedMap.Data["versionConfigURL"]; ok {
+						os.Setenv(COMPAT_MATRIX_CONFIG_URL, dataURLValue)
 					}
-					if endpointKey, ok := updatedMap.Data["versionConfigContent"]; ok {
-						if targetContent, ok := updatedMap.Data[endpointKey]; ok {
-							os.Setenv(COMPAT_MATRIX_CONFIG_CONTENT, targetContent)
-						}
+					if dataContentValue, ok := updatedMap.Data["versionConfigContent"]; ok {
+						os.Setenv(COMPAT_MATRIX_CONFIG_CONTENT, dataContentValue)
 					}
 				}
-				r.Logger.Info("VDOConfig Matrix is refereshed, URL : ", os.Getenv(COMPAT_MATRIX_CONFIG_URL), " ConfigContent : ", os.Getenv(COMPAT_MATRIX_CONFIG_CONTENT))
 				mutex.Unlock()
+				r.Logger.Info("VDOConfig Matrix is refreshed, URL :", os.Getenv(COMPAT_MATRIX_CONFIG_URL), " ConfigContent : ", os.Getenv(COMPAT_MATRIX_CONFIG_CONTENT))
 				if controllerReconcileContext != nil && controllerReconcileRequest.Namespace != "" {
 					_, err := r.checkCompatibilityMatrixAndApplyChange(controllerReconcileContext, controllerReconcileRequest)
 					if err != nil {
@@ -226,8 +222,6 @@ func (r *VDOConfigReconciler) updateMatrixEndpoint(eventChannel <-chan watch.Eve
 				os.Setenv(COMPAT_MATRIX_CONFIG_URL, "")
 				os.Setenv(COMPAT_MATRIX_CONFIG_CONTENT, "")
 				mutex.Unlock()
-			default:
-				// Do nothing
 			}
 		} else {
 			// If eventChannel is closed, it means the server has closed the connection
