@@ -93,12 +93,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err = (&controllers.VDOConfigReconciler{
+	vdoConfigReconciler := &controllers.VDOConfigReconciler{
 		Client:       mgr.GetClient(),
 		Logger:       ctrllog.Log.WithName("controllers").WithName("VDOConfig"),
 		Scheme:       mgr.GetScheme(),
 		ClientConfig: mgr.GetConfig(),
-	}).SetupWithManager(mgr); err != nil {
+	}
+	go vdoConfigReconciler.WatchForConfigMapChanges()
+
+	if err = (vdoConfigReconciler).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "VDOConfig")
 		os.Exit(1)
 	}

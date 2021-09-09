@@ -22,11 +22,13 @@ import (
 	"fmt"
 	"github.com/hashicorp/go-version"
 	"github.com/vmware-tanzu/vsphere-kubernetes-drivers-operator/pkg/drivers/csi"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/discovery"
 	"os"
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 
 	vdov1alpha1 "github.com/vmware-tanzu/vsphere-kubernetes-drivers-operator/api/v1alpha1"
 	dynclient "github.com/vmware-tanzu/vsphere-kubernetes-drivers-operator/pkg/client"
@@ -83,9 +85,13 @@ type VDOConfigReconciler struct {
 }
 
 var (
-	SessionFn = session.GetOrCreate
-	GetVMFn   = session.GetVMByIP
+	SessionFn                  = session.GetOrCreate
+	GetVMFn                    = session.GetVMByIP
+	controllerReconcileContext context.Context
+	controllerReconcileRequest ctrl.Request
 )
+
+const CM_NAME = "compat-matrix-config"
 
 // +kubebuilder:rbac:groups=vdo.vmware.com,resources=vdoconfigs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=vdo.vmware.com,resources=vdoconfigs/status,verbs=get;update;patch
@@ -109,6 +115,19 @@ var (
 
 func (r *VDOConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	r.Logger.Info("Inside VDOConfig reconciler", "name", req.NamespacedName)
+
+	controllerReconcileContext = ctx
+	controllerReconcileRequest = req
+
+	result, err := r.checkCompatibilityMatrixAndApplyChange(controllerReconcileContext, controllerReconcileRequest)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	return result, nil
+
+}
+
+func (r *VDOConfigReconciler) checkCompatibilityMatrixAndApplyChange(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 
 	clientset, err := kubernetes.NewForConfig(r.ClientConfig)
 	if err != nil {
@@ -152,6 +171,69 @@ func (r *VDOConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	return result, nil
 
+}
+
+func (r *VDOConfigReconciler) WatchForConfigMapChanges() {
+	clientset, _ := kubernetes.NewForConfig(r.ClientConfig)
+
+	mutex := &sync.Mutex{}
+
+	for {
+		watcher, err := clientset.CoreV1().ConfigMaps(VDO_NAMESPACE).Watch(
+			context.TODO(),
+			metav1.SingleObject(metav1.ObjectMeta{
+				Name: CM_NAME, Namespace: VDO_NAMESPACE}))
+		if err != nil {
+			r.Logger.Error(err, fmt.Sprintf("Error occurred while creating watcher for configMap %s", err))
+		}
+		r.updateMatrixEndpoint(watcher.ResultChan(), mutex)
+	}
+}
+
+func (r *VDOConfigReconciler) updateMatrixEndpoint(eventChannel <-chan watch.Event, mutex *sync.Mutex) {
+	for {
+		event, open := <-eventChannel
+		if open {
+			switch event.Type {
+			case watch.Added:
+				fallthrough
+			case watch.Modified:
+				mutex.Lock()
+				// Update our config
+				if updatedMap, ok := event.Object.(*v1.ConfigMap); ok {
+					if endpointKey, ok := updatedMap.Data["versionConfigURL"]; ok {
+						if targetURL, ok := updatedMap.Data[endpointKey]; ok {
+							os.Setenv(COMPAT_MATRIX_CONFIG_URL, targetURL)
+						}
+					}
+					if endpointKey, ok := updatedMap.Data["versionConfigContent"]; ok {
+						if targetContent, ok := updatedMap.Data[endpointKey]; ok {
+							os.Setenv(COMPAT_MATRIX_CONFIG_CONTENT, targetContent)
+						}
+					}
+				}
+				r.Logger.Info("VDOConfig Matrix is refereshed, URL : ", os.Getenv(COMPAT_MATRIX_CONFIG_URL), " ConfigContent : ", os.Getenv(COMPAT_MATRIX_CONFIG_CONTENT))
+				mutex.Unlock()
+				if controllerReconcileContext != nil && controllerReconcileRequest.Namespace != "" {
+					_, err := r.checkCompatibilityMatrixAndApplyChange(controllerReconcileContext, controllerReconcileRequest)
+					if err != nil {
+						return
+					}
+				}
+			case watch.Deleted:
+				mutex.Lock()
+				// Set the env vaiables to empty
+				os.Setenv(COMPAT_MATRIX_CONFIG_URL, "")
+				os.Setenv(COMPAT_MATRIX_CONFIG_CONTENT, "")
+				mutex.Unlock()
+			default:
+				// Do nothing
+			}
+		} else {
+			// If eventChannel is closed, it means the server has closed the connection
+			return
+		}
+	}
 }
 
 func (r *VDOConfigReconciler) fetchVSphereCloudConfig(ctx vdocontext.VDOContext, vSphereCloudConfigName string, vdoConfigNamespace string) (*vdov1alpha1.VsphereCloudConfig, error) {
