@@ -74,4 +74,28 @@ Save the file and raise a PR with the new image
 
 Once merged then download the code and create a new tag and push the new tag
 
+```
+git push origin 0.1.1
+```
+
+Make the linux binary for vdoctl
+
+```
+make build-vdoctl
+
+cd bin
+
+tar -cvf vdoctl-linux.tar.gz vdoctl
+
+```
+Make the Mac binary for vdoctl
+
+```
+make build-vdoctl-mac
+
+cd bin
+tar -cvf vdoctl-mac.tar.gz vdoctl
+
+```
+
 
